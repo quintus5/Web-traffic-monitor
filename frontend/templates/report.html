@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; color: #333; margin: 30px; }
+    h1 { color: #1d4ed8; font-size: 20px; margin-bottom: 4px; }
+    .subtitle { color: #6b7280; font-size: 11px; margin-bottom: 24px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th { background: #f3f4f6; padding: 6px 10px; text-align: left; font-size: 11px; color: #6b7280; text-transform: uppercase; }
+    td { padding: 6px 10px; border-bottom: 1px solid #f3f4f6; }
+    tr:hover td { background: #f9fafb; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Web Traffic Report</h1>
+  <div class="subtitle">
+    Generated: {{ generated_at.strftime('%Y-%m-%d %H:%M UTC') }}
+    {% if from_dt %} | From: {{ from_dt.strftime('%Y-%m-%d') }}{% endif %}
+    {% if to_dt %} | To: {{ to_dt.strftime('%Y-%m-%d') }}{% endif %}
+  </div>
+
+  <h2>Top Sites</h2>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Domain</th><th>Requests</th></tr>
+    </thead>
+    <tbody>
+      {% for site in top_sites %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ site.domain }}</td>
+        <td>{{ site.count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

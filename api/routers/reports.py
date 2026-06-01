@@ -1,0 +1,195 @@
+from datetime import datetime, timedelta
+from typing import Optional, List
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+from sqlalchemy import func, case
+
+from api.database import get_db
+from api import models, schemas
+
+router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
+
+
+def _base_filter(q, from_dt, to_dt, employee_id, classification):
+    if from_dt:
+        q = q.filter(models.TrafficLog.timestamp >= from_dt)
+    if to_dt:
+        q = q.filter(models.TrafficLog.timestamp <= to_dt)
+    if employee_id:
+        q = q.filter(models.TrafficLog.employee_id == employee_id)
+    if classification:
+        q = q.filter(models.TrafficLog.time_classification == classification)
+    return q
+
+
+@router.get("/top-sites", response_model=List[schemas.TopSiteSchema])
+def top_sites(
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
+    employee_id: Optional[int] = None,
+    classification: Optional[str] = None,
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    q = db.query(
+        models.TrafficLog.domain,
+        models.Category.name.label("category_name"),
+        models.Category.color.label("category_color"),
+        func.count(models.TrafficLog.id).label("request_count"),
+        func.sum(models.TrafficLog.bytes_received + models.TrafficLog.bytes_sent).label("bytes_total"),
+    ).outerjoin(models.Category, models.TrafficLog.category_id == models.Category.id)
+
+    q = _base_filter(q, from_dt, to_dt, employee_id, classification)
+    rows = q.group_by(models.TrafficLog.domain).order_by(func.count(models.TrafficLog.id).desc()).limit(limit).all()
+
+    return [
+        schemas.TopSiteSchema(
+            domain=r.domain,
+            category_name=r.category_name,
+            category_color=r.category_color,
+            request_count=r.request_count,
+            bytes_total=r.bytes_total or 0,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/top-sites-by-employee")
+def top_sites_by_employee(
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
+    classification: Optional[str] = None,
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    employees = db.query(models.Employee).all()
+    result = []
+    for emp in employees:
+        q = db.query(
+            models.TrafficLog.domain,
+            func.count(models.TrafficLog.id).label("count"),
+        ).filter(models.TrafficLog.employee_id == emp.id)
+        q = _base_filter(q, from_dt, to_dt, None, classification)
+        sites = q.group_by(models.TrafficLog.domain).order_by(func.count(models.TrafficLog.id).desc()).limit(limit).all()
+        result.append({
+            "employee": {"id": emp.id, "username": emp.username, "email": emp.email},
+            "sites": [{"domain": s.domain, "count": s.count} for s in sites],
+        })
+    return result
+
+
+@router.get("/timeline")
+def timeline(
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
+    employee_id: Optional[int] = None,
+    bucket: str = Query("hour", pattern="^(hour|day)$"),
+    db: Session = Depends(get_db),
+):
+    if not from_dt:
+        from_dt = datetime.utcnow() - timedelta(hours=24)
+    if not to_dt:
+        to_dt = datetime.utcnow()
+
+    rows = db.query(models.TrafficLog).filter(
+        models.TrafficLog.timestamp >= from_dt,
+        models.TrafficLog.timestamp <= to_dt,
+    )
+    if employee_id:
+        rows = rows.filter(models.TrafficLog.employee_id == employee_id)
+
+    rows = rows.order_by(models.TrafficLog.timestamp.asc()).all()
+
+    # Group client-side bucketing (simple for SQLite compatibility)
+    buckets: dict = {}
+    for row in rows:
+        ts = row.timestamp
+        if bucket == "hour":
+            key = ts.replace(minute=0, second=0, microsecond=0)
+        else:
+            key = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        k = (key, row.employee_id, row.domain)
+        if k not in buckets:
+            emp_name = row.employee.username if row.employee else None
+            cat_name = row.category.name if row.category else None
+            cat_color = row.category.color if row.category else "#6b7280"
+            buckets[k] = {
+                "bucket_start": key.isoformat(),
+                "employee_id": row.employee_id,
+                "employee_name": emp_name,
+                "domain": row.domain,
+                "category_name": cat_name,
+                "category_color": cat_color,
+                "count": 0,
+            }
+        buckets[k]["count"] += 1
+
+    return sorted(buckets.values(), key=lambda x: x["bucket_start"])
+
+
+@router.get("/work-break-summary", response_model=List[schemas.WorkBreakSummarySchema])
+def work_break_summary(
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(
+        models.TrafficLog.employee_id,
+        models.Employee.username,
+        models.TrafficLog.time_classification,
+        func.count(models.TrafficLog.id).label("count"),
+        func.sum(models.TrafficLog.bytes_sent + models.TrafficLog.bytes_received).label("bytes"),
+    ).outerjoin(models.Employee, models.TrafficLog.employee_id == models.Employee.id)
+
+    q = _base_filter(q, from_dt, to_dt, employee_id, None)
+    rows = q.group_by(models.TrafficLog.employee_id, models.TrafficLog.time_classification).all()
+
+    # Pivot by employee
+    pivot: dict = {}
+    for r in rows:
+        eid = r.employee_id
+        if eid not in pivot:
+            pivot[eid] = {
+                "employee_id": eid,
+                "employee_name": r.username,
+                "work_requests": 0, "break_requests": 0, "outside_requests": 0,
+                "work_bytes": 0, "break_bytes": 0, "outside_bytes": 0,
+            }
+        cls = r.time_classification
+        pivot[eid][f"{cls}_requests"] = r.count
+        pivot[eid][f"{cls}_bytes"] = r.bytes or 0
+
+    return list(pivot.values())
+
+
+@router.get("/category-breakdown", response_model=List[schemas.CategoryBreakdownSchema])
+def category_breakdown(
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
+    employee_id: Optional[int] = None,
+    classification: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(
+        models.Category.name.label("category_name"),
+        models.Category.color.label("category_color"),
+        func.count(models.TrafficLog.id).label("count"),
+        func.sum(models.TrafficLog.bytes_sent + models.TrafficLog.bytes_received).label("bytes"),
+    ).outerjoin(models.Category, models.TrafficLog.category_id == models.Category.id)
+
+    q = _base_filter(q, from_dt, to_dt, employee_id, classification)
+    rows = q.group_by(models.TrafficLog.category_id).all()
+
+    total = sum(r.count for r in rows)
+    return [
+        schemas.CategoryBreakdownSchema(
+            category_name=r.category_name or "uncategorized",
+            category_color=r.category_color or "#6b7280",
+            count=r.count,
+            bytes=r.bytes or 0,
+            percentage=round((r.count / total * 100) if total else 0, 1),
+        )
+        for r in sorted(rows, key=lambda x: x.count, reverse=True)
+    ]
