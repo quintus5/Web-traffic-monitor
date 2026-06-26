@@ -59,21 +59,6 @@ class TrafficMonitorAddon:
         except Exception as e:
             logger.debug("request hook error: %s", e)
 
-    def response(self, flow):
-        """Update bytes_received from the response (best-effort)."""
-        try:
-            if flow.response:
-                _queue.put({
-                    "_update": True,
-                    "src_ip": flow.client_conn.peername[0] if flow.client_conn.peername else "0.0.0.0",
-                    "domain": flow.request.pretty_host,
-                    "timestamp": datetime.utcnow(),
-                    "status_code": flow.response.status_code,
-                    "bytes_received": len(flow.response.content or b""),
-                })
-        except Exception as e:
-            logger.debug("response hook error: %s", e)
-
     def done(self):
         """Called when mitmproxy shuts down."""
         global _writer

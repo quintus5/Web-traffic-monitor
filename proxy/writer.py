@@ -32,6 +32,7 @@ class IPCache:
         return self._map.get(ip)
 
     def _refresh(self):
+        db = None
         try:
             db = self._factory()
             from api import models
@@ -42,10 +43,11 @@ class IPCache:
         except Exception as e:
             logger.warning("IP cache refresh failed: %s", e)
         finally:
-            try:
-                db.close()
-            except Exception:
-                pass
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
 
 class DatabaseWriter(threading.Thread):
@@ -124,6 +126,11 @@ class DatabaseWriter(threading.Thread):
         records = []
         for item in items:
             try:
+                # Response-hook items only carry status/bytes and cannot be
+                # reliably matched back to their request row in a batch writer.
+                # Skipping them avoids inserting duplicate, half-populated rows.
+                if item.get("_update"):
+                    continue
                 domain = item.get("domain", "")
                 timestamp = item.get("timestamp", datetime.utcnow())
                 src_ip = item.get("src_ip", "")

@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     API_HOST: str = "0.0.0.0"
     SECRET_KEY: str = "change-me"
+    # Dashboard login (HTTP Basic). Change ADMIN_PASSWORD before deploying.
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_PASSWORD: str = "change-me"
+    AUTH_ENABLED: bool = True
     DEFAULT_TIMEZONE: str = "UTC"
     CATEGORY_CACHE_TTL: int = 30
     IP_CACHE_TTL: int = 60

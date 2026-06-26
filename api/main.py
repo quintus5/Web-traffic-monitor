@@ -3,10 +3,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import secrets
+import base64
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -25,6 +27,36 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Web Traffic Monitor", version="1.0.0", lifespan=lifespan)
+
+
+# ── Authentication (HTTP Basic) ───────────────────────────────────────────────
+# Every route requires the admin login except the CA certificate download, which
+# employees must be able to fetch without credentials to set up the proxy.
+AUTH_EXEMPT_PATHS = {"/ca-cert.pem"}
+
+
+@app.middleware("http")
+async def basic_auth_middleware(request: Request, call_next):
+    if not settings.AUTH_ENABLED or request.url.path in AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8")
+            username, _, password = decoded.partition(":")
+            user_ok = secrets.compare_digest(username, settings.ADMIN_USERNAME)
+            pass_ok = secrets.compare_digest(password, settings.ADMIN_PASSWORD)
+            if user_ok and pass_ok:
+                return await call_next(request)
+        except Exception:
+            pass
+
+    return Response(
+        status_code=401,
+        content="Authentication required",
+        headers={"WWW-Authenticate": 'Basic realm="Web Traffic Monitor"'},
+    )
 
 
 def _seed_categories_if_empty():
@@ -108,7 +140,7 @@ async def live_stats():
 
     async def event_stream():
         while True:
-            db = next(get_db())
+            db = SessionLocal()
             try:
                 count = db.query(func.count(models.TrafficLog.id)).scalar() or 0
             finally:

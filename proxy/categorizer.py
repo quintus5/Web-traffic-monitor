@@ -16,7 +16,7 @@ class Categorizer:
     def __init__(self, db=None, ttl: int = 30):
         self._db = db
         self._ttl = ttl
-        self._cache: Optional[List[dict]] = None
+        self._loaded = False
         self._cache_loaded_at: float = 0.0
         self._exact: Dict[str, dict] = {}
         self._suffix: List[tuple] = []  # (pattern, category_dict)
@@ -24,13 +24,15 @@ class Categorizer:
 
     def _load(self):
         now = time.monotonic()
-        if self._cache is not None and (now - self._cache_loaded_at) < self._ttl:
+        # Reuse the in-memory rule tables until the TTL expires.
+        if self._loaded and (now - self._cache_loaded_at) < self._ttl:
             return
 
         if self._db is not None:
             self._load_from_db()
         else:
             self._load_from_json()
+        self._loaded = True
         self._cache_loaded_at = now
 
     def _load_from_db(self):
@@ -105,4 +107,5 @@ class Categorizer:
 
     def invalidate(self):
         """Force cache refresh on next call (e.g. after rule update)."""
+        self._loaded = False
         self._cache_loaded_at = 0.0

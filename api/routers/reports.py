@@ -91,41 +91,49 @@ def timeline(
     if not to_dt:
         to_dt = datetime.utcnow()
 
-    rows = db.query(models.TrafficLog).filter(
-        models.TrafficLog.timestamp >= from_dt,
-        models.TrafficLog.timestamp <= to_dt,
+    # Aggregate in SQL (GROUP BY a truncated timestamp) so we never load the
+    # full result set into memory, and join names to avoid N+1 lazy loads.
+    fmt = "%Y-%m-%dT%H:00:00" if bucket == "hour" else "%Y-%m-%dT00:00:00"
+    bucket_col = func.strftime(fmt, models.TrafficLog.timestamp).label("bucket_start")
+
+    q = (
+        db.query(
+            bucket_col,
+            models.TrafficLog.employee_id,
+            models.Employee.username.label("employee_name"),
+            models.TrafficLog.domain,
+            models.Category.name.label("category_name"),
+            models.Category.color.label("category_color"),
+            func.count(models.TrafficLog.id).label("count"),
+        )
+        .outerjoin(models.Employee, models.TrafficLog.employee_id == models.Employee.id)
+        .outerjoin(models.Category, models.TrafficLog.category_id == models.Category.id)
+        .filter(
+            models.TrafficLog.timestamp >= from_dt,
+            models.TrafficLog.timestamp <= to_dt,
+        )
     )
     if employee_id:
-        rows = rows.filter(models.TrafficLog.employee_id == employee_id)
+        q = q.filter(models.TrafficLog.employee_id == employee_id)
 
-    rows = rows.order_by(models.TrafficLog.timestamp.asc()).all()
+    rows = (
+        q.group_by(bucket_col, models.TrafficLog.employee_id, models.TrafficLog.domain)
+        .order_by(bucket_col.asc())
+        .all()
+    )
 
-    # Group client-side bucketing (simple for SQLite compatibility)
-    buckets: dict = {}
-    for row in rows:
-        ts = row.timestamp
-        if bucket == "hour":
-            key = ts.replace(minute=0, second=0, microsecond=0)
-        else:
-            key = ts.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        k = (key, row.employee_id, row.domain)
-        if k not in buckets:
-            emp_name = row.employee.username if row.employee else None
-            cat_name = row.category.name if row.category else None
-            cat_color = row.category.color if row.category else "#6b7280"
-            buckets[k] = {
-                "bucket_start": key.isoformat(),
-                "employee_id": row.employee_id,
-                "employee_name": emp_name,
-                "domain": row.domain,
-                "category_name": cat_name,
-                "category_color": cat_color,
-                "count": 0,
-            }
-        buckets[k]["count"] += 1
-
-    return sorted(buckets.values(), key=lambda x: x["bucket_start"])
+    return [
+        {
+            "bucket_start": r.bucket_start,
+            "employee_id": r.employee_id,
+            "employee_name": r.employee_name,
+            "domain": r.domain,
+            "category_name": r.category_name,
+            "category_color": r.category_color or "#6b7280",
+            "count": r.count,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/work-break-summary", response_model=List[schemas.WorkBreakSummarySchema])

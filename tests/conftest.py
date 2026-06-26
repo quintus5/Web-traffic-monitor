@@ -24,6 +24,10 @@ import api.database as _db
 _db.engine = test_engine
 _db.SessionLocal = TestSessionLocal
 
+# Disable dashboard auth for the API tests (auth is covered by its own test)
+from config.settings import settings as _settings
+_settings.AUTH_ENABLED = False
+
 # Now import Base and models to register ORM mappings
 from api.database import Base  # noqa
 from api import models  # noqa
