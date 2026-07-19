@@ -16,7 +16,10 @@ class Employee(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     ips = relationship("EmployeeIP", back_populates="employee", cascade="all, delete-orphan")
-    traffic_logs = relationship("TrafficLog", back_populates="employee")
+    # passive_deletes: let SQLite apply ON DELETE SET NULL instead of loading
+    # every referencing row into memory (a delete on a large table would
+    # otherwise take minutes and balloon RSS to gigabytes).
+    traffic_logs = relationship("TrafficLog", back_populates="employee", passive_deletes=True)
 
 
 class EmployeeIP(Base):
@@ -44,7 +47,8 @@ class Category(Base):
     description = Column(String(255), nullable=True)
 
     rules = relationship("CategoryRule", back_populates="category", cascade="all, delete-orphan")
-    traffic_logs = relationship("TrafficLog", back_populates="category")
+    # passive_deletes: rely on the DB's ON DELETE SET NULL (see Employee above).
+    traffic_logs = relationship("TrafficLog", back_populates="category", passive_deletes=True)
 
 
 class CategoryRule(Base):

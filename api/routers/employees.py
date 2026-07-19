@@ -38,7 +38,13 @@ def update_employee(employee_id: int, payload: schemas.EmployeeUpdate, db: Sessi
     emp = db.query(models.Employee).filter(models.Employee.id == employee_id).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
-    if payload.username is not None:
+    if payload.username is not None and payload.username != emp.username:
+        dup = db.query(models.Employee).filter(
+            models.Employee.username == payload.username,
+            models.Employee.id != employee_id,
+        ).first()
+        if dup:
+            raise HTTPException(status_code=409, detail="Username already exists")
         emp.username = payload.username
     if payload.email is not None:
         emp.email = payload.email

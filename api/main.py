@@ -40,23 +40,36 @@ async def basic_auth_middleware(request: Request, call_next):
     if not settings.AUTH_ENABLED or request.url.path in AUTH_EXEMPT_PATHS:
         return await call_next(request)
 
+    authorized = False
     header = request.headers.get("Authorization", "")
     if header.startswith("Basic "):
         try:
             decoded = base64.b64decode(header[6:]).decode("utf-8")
             username, _, password = decoded.partition(":")
-            user_ok = secrets.compare_digest(username, settings.ADMIN_USERNAME)
-            pass_ok = secrets.compare_digest(password, settings.ADMIN_PASSWORD)
-            if user_ok and pass_ok:
-                return await call_next(request)
+            # compare_digest rejects str with non-ASCII chars, so compare bytes;
+            # this also keeps the comparison constant-time for unicode creds.
+            user_ok = secrets.compare_digest(
+                username.encode("utf-8"), settings.ADMIN_USERNAME.encode("utf-8")
+            )
+            pass_ok = secrets.compare_digest(
+                password.encode("utf-8"), settings.ADMIN_PASSWORD.encode("utf-8")
+            )
+            authorized = user_ok and pass_ok
         except Exception:
-            pass
+            authorized = False
 
-    return Response(
-        status_code=401,
-        content="Authentication required",
-        headers={"WWW-Authenticate": 'Basic realm="Web Traffic Monitor"'},
-    )
+    if not authorized:
+        return Response(
+            status_code=401,
+            content="Authentication required",
+            headers={"WWW-Authenticate": 'Basic realm="Web Traffic Monitor"'},
+        )
+
+    # IMPORTANT: run the route OUTSIDE the credential-check try/except above.
+    # If call_next were inside it, any exception raised by a downstream route
+    # would be swallowed and reported to the client as a misleading 401 (and
+    # never logged as a 500). Keeping it here lets real errors surface normally.
+    return await call_next(request)
 
 
 def _seed_categories_if_empty():

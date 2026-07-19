@@ -190,14 +190,29 @@ def category_breakdown(
     q = _base_filter(q, from_dt, to_dt, employee_id, classification)
     rows = q.group_by(models.TrafficLog.category_id).all()
 
-    total = sum(r.count for r in rows)
+    # Merge by display name so rows that resolve to the same label collapse into
+    # one entry. In particular, a category_id that references a since-deleted
+    # category has a NULL name and would otherwise show up as a second,
+    # separate "uncategorized" bucket alongside the real category_id IS NULL one.
+    merged: dict = {}
+    for r in rows:
+        name = r.category_name or "uncategorized"
+        entry = merged.setdefault(
+            name,
+            {"category_name": name, "category_color": r.category_color or "#6b7280",
+             "count": 0, "bytes": 0},
+        )
+        entry["count"] += r.count
+        entry["bytes"] += r.bytes or 0
+
+    total = sum(e["count"] for e in merged.values())
     return [
         schemas.CategoryBreakdownSchema(
-            category_name=r.category_name or "uncategorized",
-            category_color=r.category_color or "#6b7280",
-            count=r.count,
-            bytes=r.bytes or 0,
-            percentage=round((r.count / total * 100) if total else 0, 1),
+            category_name=e["category_name"],
+            category_color=e["category_color"],
+            count=e["count"],
+            bytes=e["bytes"],
+            percentage=round((e["count"] / total * 100) if total else 0, 1),
         )
-        for r in sorted(rows, key=lambda x: x.count, reverse=True)
+        for e in sorted(merged.values(), key=lambda x: x["count"], reverse=True)
     ]

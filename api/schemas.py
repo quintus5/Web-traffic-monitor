@@ -1,6 +1,11 @@
+import re
 from datetime import datetime, time
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+from proxy.categorizer import is_safe_regex, MAX_PATTERN_LENGTH
+
+_ALLOWED_MATCH_TYPES = {"exact", "suffix", "regex"}
 
 
 # ── Employee ──────────────────────────────────────────────────────────────────
@@ -53,7 +58,25 @@ class CategoryRuleBase(BaseModel):
 
 
 class CategoryRuleCreate(CategoryRuleBase):
-    pass
+    @model_validator(mode="after")
+    def _validate_rule(self):
+        if self.match_type not in _ALLOWED_MATCH_TYPES:
+            raise ValueError(f"match_type must be one of {sorted(_ALLOWED_MATCH_TYPES)}")
+        if not self.pattern:
+            raise ValueError("pattern must not be empty")
+        if len(self.pattern) > MAX_PATTERN_LENGTH:
+            raise ValueError(f"pattern must be at most {MAX_PATTERN_LENGTH} characters")
+        if self.match_type == "regex":
+            try:
+                re.compile(self.pattern)
+            except re.error as e:
+                raise ValueError(f"invalid regex pattern: {e}")
+            if not is_safe_regex(self.pattern):
+                raise ValueError(
+                    "regex pattern rejected: nested quantifiers risk catastrophic "
+                    "backtracking (ReDoS)"
+                )
+        return self
 
 
 class CategoryRuleSchema(CategoryRuleBase):

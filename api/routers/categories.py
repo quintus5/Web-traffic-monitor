@@ -31,6 +31,13 @@ def update_category(category_id: int, payload: schemas.CategoryCreate, db: Sessi
     cat = db.query(models.Category).filter(models.Category.id == category_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
+    if payload.name != cat.name:
+        dup = db.query(models.Category).filter(
+            models.Category.name == payload.name,
+            models.Category.id != category_id,
+        ).first()
+        if dup:
+            raise HTTPException(status_code=409, detail="Category name already exists")
     cat.name = payload.name
     cat.color = payload.color
     cat.description = payload.description

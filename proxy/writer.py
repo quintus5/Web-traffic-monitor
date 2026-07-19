@@ -11,6 +11,7 @@ from typing import Optional
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ class DatabaseWriter(threading.Thread):
         self._batch_size = batch_size
         self._flush_interval = flush_interval
         self._stop_event = threading.Event()
+        # Retry policy for transient commit failures (e.g. "database is locked").
+        self._max_commit_attempts = 3
+        self._retry_backoff = 0.5
 
         engine = create_engine(db_url, connect_args={"check_same_thread": False})
 
@@ -67,7 +71,17 @@ class DatabaseWriter(threading.Thread):
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA busy_timeout=5000")
+            # Enforce FKs like the API engine so a category/employee deleted
+            # mid-flight can't leave dangling category_id/employee_id references.
+            cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
+
+        # Ensure the schema exists. Without this, launching the proxy standalone
+        # (mitmdump --scripts proxy/addon.py) against a fresh DB would create an
+        # empty file and silently drop every intercepted request.
+        from api.database import Base
+        from api import models  # noqa: F401 — registers ORM tables on Base
+        Base.metadata.create_all(bind=engine)
 
         self._SessionFactory = sessionmaker(bind=engine)
         self._ip_cache = IPCache(self._SessionFactory)
@@ -157,10 +171,69 @@ class DatabaseWriter(threading.Thread):
                 logger.warning("Failed to build record: %s", e)
 
         if records:
+            self._commit_records(db, records)
+
+    def _commit_records(self, db, records: list):
+        """Persist a batch, tolerating transient locks and individual bad rows.
+
+        The fast path is a single bulk insert. On a transient "database is
+        locked" error we retry the whole batch; on any other failure we fall
+        back to inserting rows one at a time so one poison row (or a category
+        deleted mid-flight) can't discard every valid row batched with it."""
+        for attempt in range(1, self._max_commit_attempts + 1):
             try:
                 db.bulk_save_objects(records)
                 db.commit()
                 logger.debug("Flushed %d records", len(records))
-            except Exception as e:
-                logger.error("DB flush failed: %s", e)
+                return
+            except OperationalError as e:
                 db.rollback()
+                if attempt < self._max_commit_attempts and "locked" in str(e).lower():
+                    time.sleep(self._retry_backoff * attempt)
+                    continue
+                logger.warning("Bulk flush failed (%s); inserting rows individually", e)
+                break
+            except Exception as e:
+                db.rollback()
+                logger.warning("Bulk flush failed (%s); inserting rows individually", e)
+                break
+
+        saved = sum(1 for rec in records if self._insert_single(db, rec))
+        lost = len(records) - saved
+        if lost:
+            logger.error("Flush permanently dropped %d of %d records", lost, len(records))
+        else:
+            logger.info("Recovered all %d records via per-record fallback", saved)
+
+    def _insert_single(self, db, rec) -> bool:
+        for attempt in range(1, self._max_commit_attempts + 1):
+            try:
+                db.add(rec)
+                db.commit()
+                return True
+            except IntegrityError:
+                # Most likely a category_id/employee_id that was deleted between
+                # categorization and insert. Null the FKs and keep the row as
+                # uncategorized rather than losing the traffic record entirely.
+                db.rollback()
+                if rec.category_id is None and rec.employee_id is None:
+                    return False
+                rec.category_id = None
+                rec.employee_id = None
+                try:
+                    db.add(rec)
+                    db.commit()
+                    return True
+                except Exception:
+                    db.rollback()
+                    return False
+            except OperationalError as e:
+                db.rollback()
+                if attempt < self._max_commit_attempts and "locked" in str(e).lower():
+                    time.sleep(self._retry_backoff * attempt)
+                    continue
+                return False
+            except Exception:
+                db.rollback()
+                return False
+        return False

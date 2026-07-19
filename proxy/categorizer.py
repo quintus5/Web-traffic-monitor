@@ -11,6 +11,23 @@ import re
 import time
 from typing import Optional, Dict, List
 
+# Category rule patterns are admin-supplied, so an arbitrary regex could trigger
+# catastrophic backtracking (ReDoS) and hang the categorizer — which runs on the
+# hot path for every proxied request. We reject patterns that apply a quantifier
+# to a group that already contains one (the classic "(a+)+" signature) and cap
+# the length of both the pattern and the string we run it against.
+MAX_PATTERN_LENGTH = 255
+MAX_REGEX_INPUT = 255
+_UNSAFE_REGEX = re.compile(r"\([^()]*[*+{][^()]*\)\s*[*+{]")
+
+
+def is_safe_regex(pattern: str) -> bool:
+    """Best-effort screen for catastrophic-backtracking regexes (no timeout lib
+    available). Rejects nested quantifiers and over-long patterns."""
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        return False
+    return _UNSAFE_REGEX.search(pattern) is None
+
 
 class Categorizer:
     def __init__(self, db=None, ttl: int = 30):
@@ -49,10 +66,14 @@ class Categorizer:
         for rule, cat in rules:
             cat_dict = {"id": cat.id, "name": cat.name, "color": cat.color}
             if rule.match_type == "exact":
-                self._exact[rule.pattern.lower()] = cat_dict
+                # Rules arrive priority-desc; keep the first (highest priority)
+                # so a later, lower-priority duplicate can't override it.
+                self._exact.setdefault(rule.pattern.lower(), cat_dict)
             elif rule.match_type == "suffix":
                 self._suffix.append((rule.pattern.lower(), cat_dict))
             elif rule.match_type == "regex":
+                if not is_safe_regex(rule.pattern):
+                    continue
                 try:
                     self._regex.append((re.compile(rule.pattern, re.I), cat_dict))
                 except re.error:
@@ -76,10 +97,12 @@ class Categorizer:
             mt = rule.get("match_type", "suffix")
             pat = rule["pattern"].lower()
             if mt == "exact":
-                self._exact[pat] = cat_dict
+                self._exact.setdefault(pat, cat_dict)
             elif mt == "suffix":
                 self._suffix.append((pat, cat_dict))
             elif mt == "regex":
+                if not is_safe_regex(pat):
+                    continue
                 try:
                     self._regex.append((re.compile(pat, re.I), cat_dict))
                 except re.error:
@@ -98,10 +121,11 @@ class Categorizer:
             if domain == pattern or domain.endswith("." + pattern):
                 return cat
 
-        # 3. Regex
-        for compiled, cat in self._regex:
-            if compiled.search(domain):
-                return cat
+        # 3. Regex (bounded input length as defense-in-depth against ReDoS)
+        if self._regex and len(domain) <= MAX_REGEX_INPUT:
+            for compiled, cat in self._regex:
+                if compiled.search(domain):
+                    return cat
 
         return None
 
